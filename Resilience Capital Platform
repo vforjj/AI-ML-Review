@@ -1,0 +1,208 @@
+"""
+자연자본 리스크 인텔리전스 플랫폼 (Resilience Capital Platform)의
+핵심 기능인 생물다양성 기반 재무 가치 환산 모델 (Monetary Quantification Model)입니다.
+
+AI Computer Vision 모델의 결과(종별 개체군 변화)를 입력받아
+Degradation Score(자본 손실 점수)를 도출하고, 이를 재무적 리스크 및 복원 가치로 환산합니다.
+"""
+
+import math
+from typing import Dict, List, Tuple
+
+# ====================================================================
+# 1. 상수 및 재무 프록시 설정 (Constants and Financial Proxies)
+# ====================================================================
+
+# 재해 취약 지역의 단위 면적당 자산 가치 (예: 공급망 시설, 인근 주거지, 농업 생산 가치 등)
+# 단위: 10억 원 (Proxy Value for Asset at Risk)
+ASSET_VALUE_PER_HA = 5.0
+
+# 생물다양성 복원에 따른 자본 비용(WACC) 절감 효과 (BP 단위, Proxy)
+# 복원 성공 시 자금 조달 비용 0.5%p 절감 효과를 가정
+WACC_REDUCTION_BP = 50 
+
+# 탄소 상쇄 가치 (tCO2e당 가격, 원화) - Verra/국내 시장 프록시
+CARBON_PRICE_PER_TON = 70000 
+
+# 복원 프로젝트의 잠재 탄소 흡수량 (헥타르당 5년 누적 tCO2e)
+CARBON_SEQUESTRATION_PER_HA = 150
+
+# ====================================================================
+# 2. AI 데이터 시뮬레이션 및 생물다양성 점수 산출 함수
+# ====================================================================
+
+def simulate_ai_classification(area_ha: float) -> Dict[str, int]:
+    """
+    AI 딥러닝 비전 분류 모델의 결과를 모의 시뮬레이션합니다.
+    (실제로는 Action Cam 데이터 기반으로 종별 개체수를 산출)
+    
+    Args:
+        area_ha: 조사 대상 지역의 면적 (헥타르, Ha).
+        
+    Returns:
+        Dict[str, int]: 종 이름과 해당 지역 내 추정 개체 수.
+    """
+    # 임의의 생물다양성 데이터 (종의 중요도에 따라 개체수가 다르게 설정됨)
+    # 복원 전: 중요한 종의 개체수 낮음
+    # 복원 후: 중요한 종의 개체수 높음
+    
+    # -----------------------------------------------------------
+    # 이 부분은 '복원 전' 상황을 가정합니다.
+    # -----------------------------------------------------------
+    return {
+        "멸종위기종A (핵심 수분매개체)": int(10 * area_ha / 100),  # 중요도가 높지만 개체수는 적음
+        "일반조류B": int(30 * area_ha / 100),
+        "소형포유류C": int(20 * area_ha / 100),
+        "지표종D (건조도 지표)": int(5 * area_ha / 100) # 개체수가 낮으면 건조도가 높다는 프록시
+    }
+
+def calculate_biodiversity_health_score(species_data: Dict[str, int], area_ha: float) -> float:
+    """
+    AI 분류 결과(개체군)를 기반으로 생물다양성 건강 점수(BHS)를 산출합니다.
+    (높을수록 건강함)
+    
+    Args:
+        species_data: simulate_ai_classification 결과.
+        area_ha: 지역 면적.
+        
+    Returns:
+        float: 0.0 ~ 1.0 사이의 생물다양성 건강 점수 (BHS).
+    """
+    total_individuals = sum(species_data.values())
+    
+    # 종의 중요도(Weight)를 부여하여 단순 개체수가 아닌 '생태계 기능성'을 반영
+    weights = {
+        "멸종위기종A (핵심 수분매개체)": 0.5, # 핵심 기능 보유 종
+        "일반조류B": 0.1,
+        "소형포유류C": 0.2,
+        "지표종D (건조도 지표)": 0.2
+    }
+    
+    weighted_score = sum(count * weights.get(species, 0) for species, count in species_data.items())
+    
+    # 정규화 (100 Ha당 최대 예상 가중치 합계로 나눔)
+    max_weighted_score_proxy = 10 * 0.5 + 30 * 0.1 + 20 * 0.2 + 5 * 0.2 # 100ha 기준
+    
+    # 현재 점수를 면적 보정 후 최대값으로 정규화
+    bhs = weighted_score / (max_weighted_score_proxy * area_ha / 100)
+    
+    return min(1.0, bhs) # 점수는 최대 1.0을 넘지 않음
+
+
+# ====================================================================
+# 3. 화폐 가치 환산 모델 (Monetary Quantification Model)
+# ====================================================================
+
+def calculate_monetary_value(bhs_pre: float, bhs_post: float, area_ha: float) -> Dict[str, float]:
+    """
+    복원 전/후의 생물다양성 점수 변화를 기반으로 재무적 가치를 환산합니다.
+    
+    Args:
+        bhs_pre: 복원 전 생물다양성 건강 점수 (BHS).
+        bhs_post: 복원 후 생물다양성 건강 점수 (BHS).
+        area_ha: 지역 면적.
+        
+    Returns:
+        Dict[str, float]: 손해액 및 복원 가치 (단위: 억 원).
+    """
+    
+    # -----------------------------------------------------------
+    # 3-1. 산불 발생 시 잠재적 손해액 (V_손실) 산정 로직
+    # (Degradation Score와 손실액 연관성)
+    # -----------------------------------------------------------
+    
+    # BHS가 낮을수록(Degradation Score가 높을수록) 재해 발생 확률(P)과 피해율(L) 증가
+    # 산불 발생 확률 프록시: P = (1 - BHS) * 0.4 (BHS 0.0일 때 40% 확률, BHS 1.0일 때 0%)
+    prob_wildfire_pre = (1.0 - bhs_pre) * 0.4
+    
+    # 잠재적 피해율 프록시: L = 0.5 + (1 - BHS) * 0.5 (BHS 0.0일 때 100% 피해, BHS 1.0일 때 50% 피해)
+    loss_rate_pre = 0.5 + (1.0 - bhs_pre) * 0.5
+    
+    # V_손실 = 잠재적 손해액 (복원 전의 연간 예상 손실)
+    # V_손실 = P_전 * L_전 * 총 자산 가치
+    total_asset_value = ASSET_VALUE_PER_HA * area_ha
+    V_loss_potential = prob_wildfire_pre * loss_rate_pre * total_asset_value
+    
+    # -----------------------------------------------------------
+    # 3-2. 생물다양성 복원 시 재무 가치 상승 (V_복원) 산정 로직
+    # -----------------------------------------------------------
+
+    # BHS 개선도
+    bhs_improvement = max(0, bhs_post - bhs_pre)
+    
+    # A. 재해 예방 가치 (V_예방)
+    # 복원 후의 잠재적 손실 감소분 (BHS 개선에 비례)
+    prob_wildfire_post = (1.0 - bhs_post) * 0.4
+    loss_rate_post = 0.5 + (1.0 - bhs_post) * 0.5
+    V_loss_post = prob_wildfire_post * loss_rate_post * total_asset_value
+    
+    V_prevention = V_loss_potential - V_loss_post
+    
+    # B. 탄소 상쇄 가치 (V_탄소)
+    V_carbon = CARBON_PRICE_PER_TON * CARBON_SEQUESTRATION_PER_HA * area_ha / 100000000 # 억 원 단위로 변환
+
+    # C. 자본 비용 절감 가치 (V_자본)
+    # TNFD/ESG 등급 개선에 따른 자금 조달 비용(WACC) 절감 효과
+    # 순현재가치(NPV) 방식으로 환산 (10년 기준)
+    wacc_reduction_value = (WACC_REDUCTION_BP / 10000) * total_asset_value
+    # 10년간 절감 효과 누적 가정 (단순화)
+    V_capital_uplift = wacc_reduction_value * 10 * bhs_improvement # BHS 개선도에 비례 적용
+    
+    # D. 인셋팅/운영 안정화 가치 (V_인셋팅)
+    # 수분 매개 안정화 등 공급망 OPEX 리스크 절감 (연간 헥타르당 0.1억 원)
+    V_insetting = 0.1 * area_ha * bhs_improvement # BHS 개선도에 비례 적용
+
+    V_restoration_total = V_prevention + V_carbon + V_capital_uplift + V_insetting
+    
+    return {
+        "V_잠재_손실액_억": round(V_loss_potential, 3),          # 복원 전의 예상 연간 손실액
+        "V_복원_총가치_억": round(V_restoration_total, 3),        # 복원 프로젝트를 통한 총 재무 가치 상승분
+        "V_재해_예방_억": round(V_prevention, 3),              # 재해 발생 확률 감소로 인한 순이익
+        "V_탄소_상쇄_억": round(V_carbon, 3),                  # 탄소 크레딧 판매 가치
+        "V_자본_비용_억": round(V_capital_uplift, 3),          # WACC 절감으로 인한 가치 상승
+        "V_인셋팅_억": round(V_insetting, 3)                   # 운영 안정화 가치
+    }
+
+# ====================================================================
+# 4. 모델 실행 예시
+# ====================================================================
+
+if __name__ == "__main__":
+    
+    PROJECT_AREA_HA = 500  # 500 헥타르 프로젝트 면적 가정
+    
+    print("-" * 50)
+    print(f"** Resilience Capital Platform: 재무 가치 환산 시뮬레이션 **")
+    print(f"프로젝트 면적: {PROJECT_AREA_HA} 헥타르")
+    print("-" * 50)
+    
+    # 1. 복원 전 (Degraded State) 시뮬레이션
+    print("[1. 복원 전 (Pre-Restoration) 분석]")
+    pre_data = simulate_ai_classification(PROJECT_AREA_HA)
+    bhs_pre = calculate_biodiversity_health_score(pre_data, PROJECT_AREA_HA)
+    
+    print(f"  > AI 분류 결과 (샘플): {list(pre_data.keys())[0]} {list(pre_data.values())[0]} 개체")
+    print(f"  > 생물다양성 건강 점수 (BHS_Pre): {bhs_pre:.2f}")
+    
+    # 2. 복원 후 (Restored State) 시뮬레이션 - 인위적으로 BHS를 높여 가정
+    print("\n[2. 복원 후 (Post-Restoration) 목표 설정]")
+    # 복원 프로젝트 성공 후, 핵심 수분매개체 개체수가 5배 증가했다고 가정
+    post_data = pre_data.copy()
+    post_data["멸종위기종A (핵심 수분매개체)"] *= 5 
+    bhs_post = calculate_biodiversity_health_score(post_data, PROJECT_AREA_HA)
+    
+    print(f"  > 목표 복원 후 BHS (BHS_Post): {bhs_post:.2f}")
+    
+    # 3. 화폐 가치 환산
+    print("\n[3. 재무적 가치 환산 결과 (단위: 억 원)]")
+    results = calculate_monetary_value(bhs_pre, bhs_post, PROJECT_AREA_HA)
+    
+    # 결과 출력
+    for key, value in results.items():
+        print(f"  > {key.ljust(15)}: {value} 억 원")
+        
+    print("-" * 50)
+    print(f"최종 결론:")
+    print(f"  > BHS 개선으로 인한 **연간 잠재적 재해 손실 감소분 (V_예방)**: {results['V_재해_예방_억']} 억 원")
+    print(f"  > 복원 프로젝트의 **총 재무 가치 상승분 (V_복원)**: {results['V_복원_총가치_억']} 억 원")
+    print("-" * 50)
